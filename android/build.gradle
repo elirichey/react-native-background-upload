@@ -1,7 +1,7 @@
 buildscript {
     ext {
         kotlinVersion = "1.9.24"
-        buildToolsVersion = "34.0.0"
+        buildToolsVersion = "34.0.8"
         compileSdkVersion = 34
         targetSdkVersion = 34
         minSdkVersion = 24
@@ -64,7 +64,7 @@ dependencies {
 
     implementation "org.jetbrains.kotlin:$_kotlinStdlib:$_kotlinVersion"
 
-    implementation 'net.gotev:uploadservice-okhttp:4.7.0'
+    implementation 'net.gotev:uploadservice-okhttp:4.9.2'
 
     implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.0.0'
 }
