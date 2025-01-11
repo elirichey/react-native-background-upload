@@ -1,4 +1,4 @@
-declare module '@appfolio/react-native-upload' {
+declare module 'react-native-upload' {
   import type { EventSubscription } from 'react-native';
 
   export interface EventData {
@@ -119,7 +119,7 @@ declare module '@appfolio/react-native-upload' {
     Running = 'running',
   }
 
-  export type SystemUploadStates = Array<{ id: string, state: UploadState }>;
+  export type SystemUploadStates = Array<{ id: string; state: UploadState }>;
 
   export default class Upload {
     static startUpload(
