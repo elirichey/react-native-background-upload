@@ -1,5 +1,5 @@
 {
-  "name": "@meddly/rn-vision-camera",
+  "name": "@appfolio/react-native-upload",
   "version": "6.15.0",
   "description": "Cross platform http post file uploader with Android and iOS background support.",
   "main": "src/index.js",
@@ -24,12 +24,12 @@
   "author": "Steve Potter",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/meddly/rn-vision-camera/issues"
+    "url": "https://github.com/appfolio/react-native-upload/issues"
   },
-  "homepage": "https://github.com/meddly/rn-vision-camera",
+  "homepage": "https://github.com/appfolio/react-native-upload",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/meddly/rn-vision-camera.git"
+    "url": "git+https://github.com/appfolio/react-native-upload.git"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
