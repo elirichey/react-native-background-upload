@@ -13,8 +13,6 @@ js/settings/settings-user.*
 # OSX
 #
 .DS_Store
-yarn.lock
-package-json.lock
 
 # Xcode
 #
@@ -49,6 +47,7 @@ local.properties
 #
 node_modules/
 npm-debug.log
+tmp/node_cache
 
 # BUCK
 buck-out/

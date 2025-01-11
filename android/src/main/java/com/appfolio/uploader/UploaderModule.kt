@@ -1,4 +1,4 @@
-package com.vydia.RNUploader
+package com.appfolio.uploader
 
 import android.app.Application
 import android.app.NotificationChannel
@@ -7,17 +7,18 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import android.webkit.MimeTypeMap
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import com.appfolio.work.UploadManager
+import com.appfolio.work.UploadWorker
 import com.facebook.react.BuildConfig
 import com.facebook.react.bridge.*
-import net.gotev.uploadservice.UploadService
 import net.gotev.uploadservice.UploadServiceConfig.httpStack
 import net.gotev.uploadservice.UploadServiceConfig.initialize
 import net.gotev.uploadservice.data.UploadNotificationConfig
 import net.gotev.uploadservice.data.UploadNotificationStatusConfig
 import net.gotev.uploadservice.observer.request.GlobalRequestObserver
 import net.gotev.uploadservice.okhttp.OkHttpStack
-import net.gotev.uploadservice.protocols.binary.BinaryUploadRequest
-import net.gotev.uploadservice.protocols.multipart.MultipartUploadRequest
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -26,9 +27,18 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
   private val TAG = "UploaderBridge"
   private var notificationChannelID = "BackgroundUploadChannel"
   private var isGlobalRequestObserver = false
+  private var limitNetwork = false
 
   override fun getName(): String {
     return "RNFileUploader"
+  }
+
+  /*
+    Sets uploading network limit to unmetered network.
+   */
+  @ReactMethod
+  fun shouldLimitNetwork(limit: Boolean) {
+    limitNetwork = limit;
   }
 
   /*
@@ -63,10 +73,9 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
     var followRedirects = true
     var followSslRedirects = true
     var retryOnConnectionFailure = true
-    var connectTimeout = 600
-    var writeTimeout = 600
-    var readTimeout = 600
-    
+    var connectTimeout = 45
+    var writeTimeout = 90
+    var readTimeout = 90
     //TODO: make 'cache' customizable
     if (options.hasKey("followRedirects")) {
       if (options.getType("followRedirects") != ReadableType.Boolean) {
@@ -188,7 +197,7 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
     val customUploadId = if (options.hasKey("customUploadId") && options.getType("method") == ReadableType.String) options.getString("customUploadId") else null
     try {
       val request = if (requestType == "raw") {
-        BinaryUploadRequest(this.reactApplicationContext, url!!)
+        ModifiedBinaryUploadRequest(this.reactApplicationContext, url!!, limitNetwork)
                 .setFileToUpload(filePath!!)
       } else {
         if (!options.hasKey("field")) {
@@ -199,7 +208,7 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
           promise.reject(java.lang.IllegalArgumentException("field must be string."))
           return
         }
-        MultipartUploadRequest(this.reactApplicationContext, url!!)
+        ModifiedMultipartUploadRequest(this.reactApplicationContext, url!!, limitNetwork)
                 .addFileToUpload(filePath!!, options.getString("field")!!)
       }
       request.setMethod(method!!)
@@ -259,7 +268,7 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
         }
       }
       if (customUploadId != null)
-        request.setUploadID(customUploadId)
+        request.setCustomUploadID(customUploadId)
 
       val uploadId = request.startUpload()
       promise.resolve(uploadId)
@@ -282,7 +291,7 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
       return
     }
     try {
-      UploadService.stopUpload(cancelUploadId)
+      UploadManager.stopUpload(cancelUploadId)
       promise.resolve(true)
     } catch (exc: java.lang.Exception) {
       exc.printStackTrace()
@@ -297,13 +306,58 @@ class UploaderModule(val reactContext: ReactApplicationContext) : ReactContextBa
   @ReactMethod
   fun stopAllUploads(promise: Promise) {
     try {
-      UploadService.stopAllUploads()
+      UploadManager.stopAllUploads()
       promise.resolve(true)
     } catch (exc: java.lang.Exception) {
       exc.printStackTrace()
       Log.e(TAG, exc.message, exc)
       promise.reject(exc)
     }
+  }
+
+  /*
+   * Gets all file uploads with their state
+   */
+  @ReactMethod
+  fun getAllUploads(promise: Promise) {
+    val workManager: WorkManager = WorkManager.getInstance(reactContext)
+    val workInfos = workManager.getWorkInfosByTag(UploadWorker::class.java.name).get()
+    val uploads = Arguments.createArray()
+
+    for (info in workInfos) {
+      // Ignore 'SUCCEEDED' state from WorkManager since that only means that the uploads have started
+      if (info.state === WorkInfo.State.SUCCEEDED) {
+        continue
+      }
+
+      val upload = Arguments.createMap()
+      
+      val idTag = info.tags.toTypedArray().find { it.startsWith(UploadWorker::class.java.simpleName) }
+      upload.putString("id", idTag?.removePrefix("${UploadWorker::class.java.simpleName}-"))
+
+      when(info.state) {
+        WorkInfo.State.RUNNING ->
+          upload.putString("state", "running")
+        WorkInfo.State.CANCELLED, WorkInfo.State.FAILED ->
+          upload.putString("state", "cancelled")
+        WorkInfo.State.BLOCKED, WorkInfo.State.ENQUEUED ->
+          upload.putString("state", "pending")
+        else ->
+          continue
+      }
+
+      uploads.pushMap(upload)
+    }
+
+    val uploadTaskList = UploadManager.taskList
+    for (task in uploadTaskList) {
+      val upload = Arguments.createMap()
+      upload.putString("id", task)
+      upload.putString("state", "running")
+      uploads.pushMap(upload)
+    }
+
+    promise.resolve(uploads)
   }
 
   // Customize the notification channel as you wish. This is only for a bare minimum example

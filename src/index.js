@@ -2,7 +2,7 @@
 /**
  * Handles HTTP background file uploads from an iOS or Android device.
  */
-import { NativeModules, DeviceEventEmitter } from 'react-native';
+import { NativeModules, DeviceEventEmitter, Platform } from 'react-native';
 
 export type UploadEvent = 'progress' | 'error' | 'completed' | 'cancelled';
 
@@ -26,7 +26,7 @@ export type StartUploadArgs = {
 };
 
 const NativeModule =
-  NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader; // iOS is VydiaRNFileUploader and Android is RNFileUploader
+  NativeModules.VydiaRNFileUploader || NativeModules.RNFileUploader; // iOS is VydiaRNFileUploader and Android is NativeModules
 const eventPrefix = 'RNFileUploader-';
 
 // for IOS, register event listeners or else they don't fire on DeviceEventEmitter
@@ -119,4 +119,33 @@ export const addListener = (
   });
 };
 
-export default { startUpload, cancelUpload, addListener, getFileInfo };
+export const canSuspendIfBackground = () => {
+  if (Platform.OS === 'ios') {
+    NativeModule.canSuspendIfBackground();
+  }
+};
+
+export const shouldLimitNetwork = (limit: boolean) => {
+  NativeModule.shouldLimitNetwork(limit);
+};
+
+export const UploadState = {
+  Cancelled: 'cancelled',
+  Completed: 'completed',
+  Pending: 'pending',
+  Running: 'running',
+};
+
+export const getAllUploads = () => {
+  return NativeModule.getAllUploads();
+};
+
+export default {
+  startUpload,
+  cancelUpload,
+  addListener,
+  getFileInfo,
+  canSuspendIfBackground,
+  shouldLimitNetwork,
+  getAllUploads,
+};

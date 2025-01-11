@@ -4,39 +4,41 @@
 #import <React/RCTBridgeModule.h>
 #import <Photos/Photos.h>
 
-@interface VydiaRNFileUploader : RCTEventEmitter <RCTBridgeModule, NSURLSessionTaskDelegate>
-{
-  NSMutableDictionary *_responsesData;
-}
-@end
+#import "VydiaRNFileUploader.h"
 
 @implementation VydiaRNFileUploader
 
 RCT_EXPORT_MODULE();
 
 @synthesize bridge = _bridge;
-static int uploadId = 0;
-static RCTEventEmitter* staticEventEmitter = nil;
+static VydiaRNFileUploader* staticInstance = nil;
 static NSString *BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload";
+NSMutableDictionary *_responsesData;
 NSURLSession *_urlSession = nil;
+void (^backgroundSessionCompletionHandler)(void) = nil;
+BOOL limitNetwork = NO;
 
 + (BOOL)requiresMainQueueSetup {
-    return NO;
+    return YES;
 }
 
+- (dispatch_queue_t)methodQueue
+ {
+   return dispatch_get_main_queue();
+ }
+
 -(id) init {
-  self = [super init];
-  if (self) {
-    staticEventEmitter = self;
-    _responsesData = [NSMutableDictionary dictionary];
-  }
-  return self;
+    self = [super init];
+    if (self) {
+        staticInstance = self;
+        _responsesData = [NSMutableDictionary dictionary];
+    }
+    return self;
 }
 
 - (void)_sendEventWithName:(NSString *)eventName body:(id)body {
-  if (staticEventEmitter == nil)
-    return;
-  [staticEventEmitter sendEventWithName:eventName body:body];
+    if (staticInstance == nil) return;
+    [staticInstance sendEventWithName:eventName body:body];
 }
 
 - (NSArray<NSString *> *)supportedEvents {
@@ -46,6 +48,23 @@ NSURLSession *_urlSession = nil;
         @"RNFileUploader-cancelled",
         @"RNFileUploader-completed"
     ];
+}
+
+- (void)startObserving {
+    // JS side is ready to receive events; create the background url session if necessary
+    // iOS will then deliver the tasks completed while the app was dead (if any)
+    NSString *appGroup = nil;
+    double delayInSeconds = 5;
+    dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, delayInSeconds * NSEC_PER_SEC);
+    dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+        [self urlSession:appGroup];
+    });
+}
+
++ (void)setCompletionHandlerWithIdentifier: (NSString *)identifier completionHandler: (void (^)())completionHandler {
+    if ([BACKGROUND_SESSION_ID isEqualToString:identifier]) {
+        backgroundSessionCompletionHandler = completionHandler;
+    }
 }
 
 /*
@@ -145,12 +164,6 @@ RCT_EXPORT_METHOD(getFileInfo:(NSString *)path resolve:(RCTPromiseResolveBlock)r
  */
 RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject)
 {
-    int thisUploadId;
-    @synchronized(self.class)
-    {
-        thisUploadId = uploadId++;
-    }
-
     NSString *uploadUrl = options[@"url"];
     __block NSString *fileURI = options[@"path"];
     NSString *method = options[@"method"] ?: @"POST";
@@ -196,17 +209,19 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
             dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
         }
 
-        NSURLSessionDataTask *uploadTask;
+        NSString *uploadId = customUploadId ? customUploadId : [[NSUUID UUID] UUIDString];
+        NSURLSessionUploadTask *uploadTask;
 
         if ([uploadType isEqualToString:@"multipart"]) {
             NSString *uuidStr = [[NSUUID UUID] UUIDString];
             [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", uuidStr] forHTTPHeaderField:@"Content-Type"];
 
-            NSData *httpBody = [self createBodyWithBoundary:uuidStr path:fileURI parameters: parameters fieldName:fieldName];
-            [request setHTTPBodyStream: [NSInputStream inputStreamWithData:httpBody]];
-            [request setValue:[NSString stringWithFormat:@"%zd", httpBody.length] forHTTPHeaderField:@"Content-Length"];
+            NSData *multipartData = [self createBodyWithBoundary:uuidStr path:fileURI parameters: parameters fieldName:fieldName];
+            
+            NSURL *multipartDataFileUrl = [NSURL fileURLWithPath:[NSString stringWithFormat:@"%@/%@", [self getTmpDirectory], uploadId]];
+            [multipartData writeToURL:multipartDataFileUrl atomically:YES];
 
-            uploadTask = [[self urlSession: appGroup] uploadTaskWithStreamedRequest:request];
+            uploadTask = [[self urlSession: appGroup] uploadTaskWithRequest:request fromFile:multipartDataFileUrl];
         } else {
             if (parameters.count > 0) {
                 reject(@"RN Uploader", @"Parameters supported only in multipart type", nil);
@@ -216,7 +231,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
             uploadTask = [[self urlSession: appGroup] uploadTaskWithRequest:request fromFile:[NSURL URLWithString: fileURI]];
         }
 
-        uploadTask.taskDescription = customUploadId ? customUploadId : [NSString stringWithFormat:@"%i", thisUploadId];
+        uploadTask.taskDescription = uploadId;
 
         [uploadTask resume];
         resolve(uploadTask.taskDescription);
@@ -243,10 +258,54 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
     resolve([NSNumber numberWithBool:YES]);
 }
 
+RCT_EXPORT_METHOD(canSuspendIfBackground) {
+    if (backgroundSessionCompletionHandler) {
+        backgroundSessionCompletionHandler();
+        backgroundSessionCompletionHandler = nil;
+    }
+}
+
+RCT_EXPORT_METHOD(shouldLimitNetwork: (BOOL) limit) {
+    limitNetwork = limit;
+}
+
+RCT_EXPORT_METHOD(getAllUploads:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+    NSString *appGroup = nil;
+    [[self urlSession: appGroup] getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
+        NSMutableArray *uploads = [NSMutableArray new];
+        for (NSURLSessionUploadTask *uploadTask in uploadTasks) {
+            NSString *state;
+            switch (uploadTask.state) {
+            case NSURLSessionTaskStateRunning:
+                state = @"running";
+                break;
+            case NSURLSessionTaskStateSuspended:
+                state = @"pending";
+                break;
+            case NSURLSessionTaskStateCanceling:
+                state = @"cancelled";
+                break;
+            case NSURLSessionTaskStateCompleted:
+                state = @"completed";
+                break;
+            }
+            
+            NSDictionary *upload = @{
+                @"id" : uploadTask.taskDescription,
+                @"state" : state
+            };
+            [uploads addObject:upload];
+        }
+        resolve(uploads);
+    }];
+}
+
 - (NSData *)createBodyWithBoundary:(NSString *)boundary
-                         path:(NSString *)path
-                         parameters:(NSDictionary *)parameters
-                         fieldName:(NSString *)fieldName {
+            path:(NSString *)path
+            parameters:(NSDictionary *)parameters
+            fieldName:(NSString *)fieldName {
 
     NSMutableData *httpBody = [NSMutableData data];
 
@@ -289,13 +348,26 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
         if (groupId != nil && ![groupId isEqualToString:@""]) {
             sessionConfiguration.sharedContainerIdentifier = groupId;
         }
+        if (limitNetwork) {
+            sessionConfiguration.allowsCellularAccess = NO;
+        }
         _urlSession = [NSURLSession sessionWithConfiguration:sessionConfiguration delegate:self delegateQueue:nil];
     }
 
     return _urlSession;
 }
 
-#pragma NSURLSessionTaskDelegate
+- (NSString *)getTmpDirectory {
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSString *namespace = @"react-native-upload";
+    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingString:namespace];
+    
+    [manager createDirectoryAtPath: tmpPath withIntermediateDirectories:YES attributes:nil error:nil];
+    
+    return tmpPath;
+}
+
+#pragma mark - NSURLSessionTaskDelegate
 
 - (void)URLSession:(NSURLSession *)session
               task:(NSURLSessionTask *)task
@@ -330,6 +402,9 @@ didCompleteWithError:(NSError *)error {
             [self _sendEventWithName:@"RNFileUploader-error" body:data];
         }
     }
+
+    NSURL *multipartDataFileUrl = [NSURL fileURLWithPath:[NSString stringWithFormat:@"%@/%@", [self getTmpDirectory], task.taskDescription]];
+    [[NSFileManager defaultManager] removeItemAtURL:multipartDataFileUrl error:nil];
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -359,14 +434,23 @@ totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
     }
 }
 
-- (void)URLSession:(NSURLSession *)session
-              task:(NSURLSessionTask *)task
- needNewBodyStream:(void (^)(NSInputStream *bodyStream))completionHandler {
+#pragma mark - NSURLSessionDelegate
 
-    NSInputStream *inputStream = task.originalRequest.HTTPBodyStream;
-
-    if (completionHandler) {
-        completionHandler(inputStream);
+- (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session {
+    if (backgroundSessionCompletionHandler) {
+        NSLog(@"RNBU Did Finish Events For Background URLSession (has backgroundSessionCompletionHandler)");
+        // This long delay is set as a security if the JS side does not call :canSuspendIfBackground: promptly
+        double delayInSeconds = 45.0;
+        dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, delayInSeconds * NSEC_PER_SEC);
+        dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+            if (backgroundSessionCompletionHandler) {
+                backgroundSessionCompletionHandler();
+                NSLog(@"RNBU did call backgroundSessionCompletionHandler (timeout)");
+                backgroundSessionCompletionHandler = nil;
+            }
+        });
+    } else {
+        NSLog(@"RNBU Did Finish Events For Background URLSession (no backgroundSessionCompletionHandler)");
     }
 }
 
